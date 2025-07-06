@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BTC Trading Terminal</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
+  <style>
+    body {
+      background: #111;
+      color: #eee;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 { text-align: center; color: #ffa500; }
+    canvas { background: #000; margin: auto; display: block; max-width: 1000px; }
+    #summary, #alerts, #controls {
+      max-width: 1000px;
+      margin: auto;
+      margin-top: 20px;
+      padding: 10px;
+      background: #222;
+      border-radius: 8px;
+    }
+    label, button, input { margin: 5px; font-size: 14px; }
+    table {
+      width: 100%;
+      margin-top: 10px;
+      border-collapse: collapse;
+    }
+    td, th {
+      border: 1px solid #333;
+      padding: 5px;
+      text-align: center;
+    }
+    .gain { color: #0f0; }
+    .loss { color: #f44; }
+    .neutral { color: #ccc; }
+  </style>
+</head>
+<body>
+<h1>BTC Trading Terminal</h1>
+
+<div id="controls">
+  <label>Alert Threshold ($): <input id="threshold" type="number" value="50"></label>
+  <button onclick="toggleTheme()">🌙/☀️</button>
+  <button onclick="downloadCSV()">📁 Export CSV</button>
+</div>
+
+<canvas id="candleChart" height="300"></canvas>
+<div id="summary"></div>
+<div id="alerts"></div>
+
+<table id="logTable">
+  <thead>
+    <tr><th>Time</th><th>Price</th><th>Δ</th><th>Volume</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<audio id="beep" src="https://www.soundjay.com/button/beep-07.wav" preload="auto"></audio>
+
+<script>
+const candleCtx = document.getElementById('candleChart').getContext('2d');
+const logTable = document.querySelector('#logTable tbody');
+const beep = document.getElementById('beep');
+const thresholdInput = document.getElementById('threshold');
+let lastPrice = null;
+let ohlc = [];
+let volumes = [];
+let labels = [];
+let csvData = [];
+
+let chart = new Chart(candleCtx, {
+  type: 'candlestick',
+  data: {
+    datasets: [{
+      label: 'BTC/USD',
+      data: ohlc,
+      borderColor: "#ffa500"
+    }]
+  },
+  options: {
+    parsing: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        type: 'time',
+        time: { unit: 'minute' },
+        ticks: { color: '#888' }
+      },
+      y: {
+        ticks: { color: '#ccc' }
+      }
+    }
+  }
+});
+
+function updateSummary(price, delta, volume) {
+  const summary = document.getElementById('summary');
+  let up = 0, down = 0, flat = 0;
+  csvData.forEach((r,i) => {
+    if (i === 0) return;
+    const diff = r[1] - csvData[i-1][1];
+    if (diff > 0) up++;
+    else if (diff < 0) down++;
+    else flat++;
+  });
+  summary.innerHTML = `
+    <b>Current Price:</b> $${price.toFixed(2)} | 
+    <b>Change:</b> <span class="${delta > 0 ? 'gain' : delta < 0 ? 'loss' : 'neutral'}">${delta.toFixed(2)}</span><br>
+    <b>Movement Summary:</b> ↑ ${up} | ↓ ${down} | → ${flat}
+  `;
+}
+
+function logRow(time, price, delta, volume) {
+  const row = document.createElement('tr');
+  row.innerHTML = `
+    <td>${time}</td>
+    <td>${price.toFixed(2)}</td>
+    <td class="${delta > 0 ? 'gain' : delta < 0 ? 'loss' : 'neutral'}">${delta.toFixed(2)}</td>
+    <td>${volume.toFixed(3)}</td>
+  `;
+  logTable.prepend(row);
+}
+
+function sendAlert(delta, price) {
+  const alerts = document.getElementById('alerts');
+  const div = document.createElement('div');
+  div.innerHTML = `🚨 BTC moved $${delta.toFixed(2)} to $${price.toFixed(2)} at ${new Date().toLocaleTimeString()}`;
+  alerts.prepend(div);
+  beep.play();
+  // Optional: Send to webhook here
+}
+
+function toggleTheme() {
+  document.body.classList.toggle('light');
+}
+
+function downloadCSV() {
+  let csv = 'Time,Price,Delta,Volume\n';
+  csvData.forEach(row => {
+    csv += row.join(',') + '\n';
+  });
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'btc_log.csv';
+  a.click();
+}
+
+function addCandle(data) {
+  const [time, open, high, low, close, volume] = data;
+  const item = {
+    x: time,
+    o: open,
+    h: high,
+    l: low,
+    c: close
+  };
+  ohlc.push(item);
+  volumes.push(volume);
+  labels.push(time);
+  if (ohlc.length > 500) {
+    ohlc.shift(); volumes.shift(); labels.shift();
+  }
+  chart.update();
+}
+
+function processCandle(msg) {
+  const d = JSON.parse(msg.data);
+  if (!d.k || !d.k.x) return;
+  const k = d.k;
+  const price = parseFloat(k.c);
+  const delta = lastPrice ? price - lastPrice : 0;
+  const time = new Date(k.t).toLocaleTimeString();
+  const vol = parseFloat(k.v);
+
+  csvData.push([time, price, delta, vol]);
+  if (csvData.length > 1000) csvData.shift();
+
+  addCandle([k.t, parseFloat(k.o), parseFloat(k.h), parseFloat(k.l), price, vol]);
+  updateSummary(price, delta, vol);
+  logRow(time, price, delta, vol);
+
+  const alertDelta = parseFloat(thresholdInput.value);
+  if (Math.abs(delta) >= alertDelta) sendAlert(delta, price);
+
+  lastPrice = price;
+}
+
+// Connect to Binance Kline WebSocket (1m candles)
+const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_1m');
+ws.onmessage = processCandle;
+</script>
+</body>
+</html>
