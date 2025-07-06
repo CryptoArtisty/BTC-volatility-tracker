@@ -1,200 +1,330 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>BTC Trading Terminal</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
+  <meta charset="UTF-8" />
+  <title>Bitcoin Volatility Tracker</title>
   <style>
     body {
-      background: #111;
-      color: #eee;
       font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 20px;
+      margin: 20px;
+      background-color: #111;
+      color: #f4f4f4;
+      transition: background 0.3s, color 0.3s;
     }
-    h1 { text-align: center; color: #ffa500; }
-    canvas { background: #000; margin: auto; display: block; max-width: 1000px; }
-    #summary, #alerts, #controls {
+    h1 {
+      text-align: center;
+      color: #ffa500;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
       max-width: 1000px;
       margin: auto;
-      margin-top: 20px;
-      padding: 10px;
-      background: #222;
-      border-radius: 8px;
+      margin-bottom: 20px;
     }
-    label, button, input { margin: 5px; font-size: 14px; }
-    table {
-      width: 100%;
-      margin-top: 10px;
-      border-collapse: collapse;
-    }
-    td, th {
+    th, td {
       border: 1px solid #333;
-      padding: 5px;
+      padding: 8px;
       text-align: center;
     }
-    .gain { color: #0f0; }
-    .loss { color: #f44; }
-    .neutral { color: #ccc; }
+    th {
+      background: #222;
+      color: #fff;
+      position: sticky;
+      top: 0;
+    }
+    .gain { color: #00ff00; }
+    .loss { color: #ff4444; }
+    .neutral { color: #cccccc; }
+    #status, #summary, #movementTally {
+      text-align: center;
+      margin: 10px auto;
+      max-width: 1000px;
+    }
+    #summary, #movementTally {
+      background: #222;
+      padding: 10px;
+      border-radius: 8px;
+    }
+    .btn-bar {
+      text-align: center;
+      margin: 10px 0;
+    }
+    button {
+      padding: 8px 16px;
+      margin: 5px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    input[type="number"] {
+      width: 80px;
+      padding: 5px;
+      margin: 0 10px;
+    }
+    label {
+      margin-right: 10px;
+    }
+    .light-mode {
+      background-color: #fff;
+      color: #000;
+    }
+    .light-mode table th {
+      background: #eee;
+      color: #000;
+    }
+    .light-mode #summary, .light-mode #movementTally {
+      background: #f0f0f0;
+    }
   </style>
 </head>
 <body>
-<h1>BTC Trading Terminal</h1>
 
-<div id="controls">
-  <label>Alert Threshold ($): <input id="threshold" type="number" value="50"></label>
-  <button onclick="toggleTheme()">🌙/☀️</button>
+<h1>Bitcoin Volatility Tracker</h1>
+<div id="status">Loading...</div>
+<div id="summary"></div>
+<div id="movementTally"></div>
+
+<div class="btn-bar">
+  <label>Alert Threshold:
+    <input type="number" id="threshold" value="50" />
+  </label>
+  <label>
+    <input type="checkbox" id="autoReset" /> Auto-reset daily
+  </label>
   <button onclick="downloadCSV()">📁 Export CSV</button>
+  <button onclick="toggleTheme()">🌙/☀️ Toggle Theme</button>
+  <button onclick="clearData()">🧹 Clear All Data</button>
 </div>
 
-<canvas id="candleChart" height="300"></canvas>
-<div id="summary"></div>
-<div id="alerts"></div>
+<canvas id="chart" height="100" style="max-width: 1000px; margin: auto; display: block;"></canvas>
 
-<table id="logTable">
+<table id="vol-table">
   <thead>
-    <tr><th>Time</th><th>Price</th><th>Δ</th><th>Volume</th></tr>
+    <tr>
+      <th>Day</th>
+      <th>UTC Time</th>
+      <th>Local Time</th>
+      <th>Price (USD)</th>
+      <th>Δ Price</th>
+    </tr>
   </thead>
   <tbody></tbody>
 </table>
 
-<audio id="beep" src="https://www.soundjay.com/button/beep-07.wav" preload="auto"></audio>
+<audio id="alertSound" src="https://www.soundjay.com/button/beep-07.wav" preload="auto"></audio>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
-const candleCtx = document.getElementById('candleChart').getContext('2d');
-const logTable = document.querySelector('#logTable tbody');
-const beep = document.getElementById('beep');
-const thresholdInput = document.getElementById('threshold');
-let lastPrice = null;
-let ohlc = [];
-let volumes = [];
-let labels = [];
-let csvData = [];
+(async function () {
+  const MAX_ENTRIES = 1440;
+  const STORAGE_KEY = "btc_volatility_data_v3";
+  const rows = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+  const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
-let chart = new Chart(candleCtx, {
-  type: 'candlestick',
-  data: {
-    datasets: [{
-      label: 'BTC/USD',
-      data: ohlc,
-      borderColor: "#ffa500"
-    }]
-  },
-  options: {
-    parsing: false,
-    plugins: { legend: { display: false } },
-    scales: {
-      x: {
-        type: 'time',
-        time: { unit: 'minute' },
-        ticks: { color: '#888' }
-      },
-      y: {
-        ticks: { color: '#ccc' }
+  const tableBody = document.querySelector('#vol-table tbody');
+  const status = document.getElementById('status');
+  const summary = document.getElementById('summary');
+  const tallyDiv = document.getElementById('movementTally');
+  const chartEl = document.getElementById('chart');
+  const alertSound = document.getElementById('alertSound');
+  const thresholdInput = document.getElementById('threshold');
+  const autoResetInput = document.getElementById('autoReset');
+
+  const chart = new Chart(chartEl.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'BTC Price (USD)',
+        data: [],
+        borderColor: '#ffa500',
+        backgroundColor: 'transparent',
+        tension: 0.3
+      }]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: { display: false },
+        y: {
+          ticks: { color: '#ccc' },
+          beginAtZero: false
+        }
       }
     }
+  });
+
+  function formatTime(date, utc = false) {
+    const opts = {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false, timeZone: utc ? 'UTC' : undefined
+    };
+    return date.toLocaleTimeString(undefined, opts);
   }
-});
 
-function updateSummary(price, delta, volume) {
-  const summary = document.getElementById('summary');
-  let up = 0, down = 0, flat = 0;
-  csvData.forEach((r,i) => {
-    if (i === 0) return;
-    const diff = r[1] - csvData[i-1][1];
-    if (diff > 0) up++;
-    else if (diff < 0) down++;
-    else flat++;
-  });
-  summary.innerHTML = `
-    <b>Current Price:</b> $${price.toFixed(2)} | 
-    <b>Change:</b> <span class="${delta > 0 ? 'gain' : delta < 0 ? 'loss' : 'neutral'}">${delta.toFixed(2)}</span><br>
-    <b>Movement Summary:</b> ↑ ${up} | ↓ ${down} | → ${flat}
-  `;
-}
+  function updateTable() {
+    tableBody.innerHTML = '';
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const { day, utcTime, localTime, price, delta } = rows[i];
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${day}</td>
+        <td>${utcTime}</td>
+        <td>${localTime}</td>
+        <td>${price.toFixed(2)}</td>
+        <td class="${delta > 0 ? 'gain' : delta < 0 ? 'loss' : 'neutral'}">
+          ${delta > 0 ? '+' : ''}${delta.toFixed(2)}
+        </td>`;
+      tableBody.appendChild(tr);
+    }
+  }
 
-function logRow(time, price, delta, volume) {
-  const row = document.createElement('tr');
-  row.innerHTML = `
-    <td>${time}</td>
-    <td>${price.toFixed(2)}</td>
-    <td class="${delta > 0 ? 'gain' : delta < 0 ? 'loss' : 'neutral'}">${delta.toFixed(2)}</td>
-    <td>${volume.toFixed(3)}</td>
-  `;
-  logTable.prepend(row);
-}
+  function updateChart() {
+    chart.data.labels = rows.map(r => r.localTime);
+    chart.data.datasets[0].data = rows.map(r => r.price);
+    chart.update();
+  }
 
-function sendAlert(delta, price) {
-  const alerts = document.getElementById('alerts');
-  const div = document.createElement('div');
-  div.innerHTML = `🚨 BTC moved $${delta.toFixed(2)} to $${price.toFixed(2)} at ${new Date().toLocaleTimeString()}`;
-  alerts.prepend(div);
-  beep.play();
-  // Optional: Send to webhook here
-}
+  function summarizeRange(minutes) {
+    const recent = rows.slice(-minutes);
+    let up = 0, down = 0, flat = 0, totalChange = 0;
 
-function toggleTheme() {
-  document.body.classList.toggle('light');
-}
+    for (let i = 1; i < recent.length; i++) {
+      const diff = recent[i].price - recent[i - 1].price;
+      totalChange += diff;
+      if (diff > 0) up++;
+      else if (diff < 0) down++;
+      else flat++;
+    }
 
-function downloadCSV() {
-  let csv = 'Time,Price,Delta,Volume\n';
-  csvData.forEach(row => {
-    csv += row.join(',') + '\n';
-  });
-  const blob = new Blob([csv], {type: 'text/csv'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'btc_log.csv';
-  a.click();
-}
+    return { up, down, flat, totalChange };
+  }
 
-function addCandle(data) {
-  const [time, open, high, low, close, volume] = data;
-  const item = {
-    x: time,
-    o: open,
-    h: high,
-    l: low,
-    c: close
+  function updateSummary() {
+    if (rows.length < 2) {
+      summary.innerHTML = '';
+      tallyDiv.innerHTML = '';
+      return;
+    }
+
+    const first = rows[0].price;
+    const last = rows[rows.length - 1].price;
+    const change = last - first;
+    const minutes = rows.length;
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+
+    const { up, down, flat } = summarizeRange(rows.length);
+    const t1h = summarizeRange(60);
+    const t4h = summarizeRange(240);
+    const t6h = summarizeRange(360);
+
+    summary.innerHTML = `
+      <strong>Time Tracked:</strong> ${hours}h ${mins}m<br>
+      <strong>Total Price Change:</strong>
+      <span class="${change >= 0 ? 'gain' : 'loss'}">${change >= 0 ? '+' : ''}${change.toFixed(2)} USD</span>
+    `;
+
+    tallyDiv.innerHTML = `
+      <h3>Price Movement Summary:</h3>
+      <b>Total</b>: ↑ ${up} | ↓ ${down} | → ${flat} <br>
+      <b>1H</b>: ↑ ${t1h.up} | ↓ ${t1h.down} | → ${t1h.flat} | Δ ${t1h.totalChange.toFixed(2)} <br>
+      <b>4H</b>: ↑ ${t4h.up} | ↓ ${t4h.down} | → ${t4h.flat} | Δ ${t4h.totalChange.toFixed(2)} <br>
+      <b>6H</b>: ↑ ${t6h.up} | ↓ ${t6h.down} | → ${t6h.flat} | Δ ${t6h.totalChange.toFixed(2)}
+    `;
+  }
+
+  function storeData() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+  }
+
+  async function fetchPrice() {
+    try {
+      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
+      const j = await r.json();
+      if (j && j.price) return parseFloat(j.price);
+    } catch {}
+    try {
+      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
+      const j = await r.json();
+      if (j.bitcoin && j.bitcoin.usd) return parseFloat(j.bitcoin.usd);
+    } catch {}
+    return null;
+  }
+
+  function checkReset() {
+    if (!autoResetInput.checked) return false;
+    const today = new Date().toDateString();
+    const last = rows[rows.length - 1]?.localDate;
+    return today !== last;
+  }
+
+  async function tick() {
+    if (checkReset()) {
+      rows.length = 0;
+      storeData();
+    }
+
+    const price = await fetchPrice();
+    if (price === null) {
+      status.textContent = '❌ Failed to fetch price.';
+      return;
+    }
+
+    const now = new Date();
+    const utcTime = formatTime(now, true);
+    const localTime = formatTime(now, false);
+    const day = now.toLocaleDateString(undefined, { weekday: 'long' });
+    const last = rows.length ? rows[rows.length - 1].price : price;
+    const delta = price - last;
+
+    rows.push({ day, utcTime, localTime, localDate: now.toDateString(), price, delta });
+    if (rows.length > MAX_ENTRIES) rows.shift();
+
+    if (Math.abs(delta) >= parseFloat(thresholdInput.value) && rows.length > 1) {
+      alertSound.play();
+    }
+
+    updateTable();
+    updateChart();
+    updateSummary();
+    storeData();
+
+    status.textContent = `✅ Last updated: ${localTime} | BTC ≈ $${price.toFixed(2)}`;
+  }
+
+  window.downloadCSV = function () {
+    let csv = 'Day,UTC Time,Local Time,Price,Delta\n';
+    rows.forEach(r => {
+      csv += `${r.day},${r.utcTime},${r.localTime},${r.price.toFixed(2)},${r.delta.toFixed(2)}\n`;
+    });
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'btc_volatility.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   };
-  ohlc.push(item);
-  volumes.push(volume);
-  labels.push(time);
-  if (ohlc.length > 500) {
-    ohlc.shift(); volumes.shift(); labels.shift();
-  }
-  chart.update();
-}
 
-function processCandle(msg) {
-  const d = JSON.parse(msg.data);
-  if (!d.k || !d.k.x) return;
-  const k = d.k;
-  const price = parseFloat(k.c);
-  const delta = lastPrice ? price - lastPrice : 0;
-  const time = new Date(k.t).toLocaleTimeString();
-  const vol = parseFloat(k.v);
+  window.toggleTheme = function () {
+    document.body.classList.toggle('light-mode');
+  };
 
-  csvData.push([time, price, delta, vol]);
-  if (csvData.length > 1000) csvData.shift();
+  window.clearData = function () {
+    if (confirm("Clear all tracking data?")) {
+      localStorage.removeItem(STORAGE_KEY);
+      location.reload();
+    }
+  };
 
-  addCandle([k.t, parseFloat(k.o), parseFloat(k.h), parseFloat(k.l), price, vol]);
-  updateSummary(price, delta, vol);
-  logRow(time, price, delta, vol);
-
-  const alertDelta = parseFloat(thresholdInput.value);
-  if (Math.abs(delta) >= alertDelta) sendAlert(delta, price);
-
-  lastPrice = price;
-}
-
-// Connect to Binance Kline WebSocket (1m candles)
-const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_1m');
-ws.onmessage = processCandle;
+  updateTable();
+  updateChart();
+  updateSummary();
+  await tick();
+  setInterval(tick, 60000);
+})();
 </script>
+
 </body>
 </html>
